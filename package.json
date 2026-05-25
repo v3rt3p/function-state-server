@@ -1,9 +1,9 @@
 {
-  "name": "alice-function-state-server",
+  "name": "@v3rt3p/function-state-server",
   "version": "1.0.0",
-  "description": "Function and State server for Alice",
+  "description": "Function and State server for v3rt3p processor",
   "main": "src/main.ts",
-  "repository": "https://github.com/b4ck5p4c3/alice-function-state-server",
+  "repository": "https://github.com/v3rt3p/function-state-server",
   "author": "radioegor146",
   "license": "MIT",
   "scripts": {
@@ -12,6 +12,7 @@
   "dependencies": {
     "@bksp/style-guide": "^1.5.0",
     "@types/express": "^5.0.3",
+    "@v3rt3p/types": "github:v3rt3p/types#1.0.2",
     "dotenv": "^17.2.0",
     "eslint": "^9.39.4",
     "express": "^5.1.0",

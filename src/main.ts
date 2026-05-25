@@ -1,3 +1,4 @@
+import { functionStateServerCallFunctionRequest } from '@v3rt3p/types/function-state-server'
 import dotenv from 'dotenv'
 import express from 'express'
 import mqtt, { MqttClient } from 'mqtt'
@@ -164,13 +165,8 @@ app.get('/functions', (_, response) => {
     })))
 })
 
-const functionCallType = z.object({
-  name: z.string(),
-  parameters: z.record(z.string(), z.union([z.string(), z.number()]))
-})
-
 app.patch('/functions', (request, response) => {
-  const body = functionCallType.parse(request.body)
+  const body = functionStateServerCallFunctionRequest.parse(request.body)
   const calledFunction = functionProviders[body.name]
   logger.info(`Called function '${body.name}' with ${JSON.stringify(body)}`)
   if (!calledFunction) {
@@ -179,7 +175,7 @@ app.patch('/functions', (request, response) => {
     })
     return
   }
-  calledFunction.invoke(body.parameters)
+  calledFunction.invoke(body.arguments)
     .then(() => {
       response.status(200).json({})
     })
