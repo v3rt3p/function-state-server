@@ -251,6 +251,8 @@ app.post('/functions', async ({ body, status }) => {
     })
   }
 
+  await calledFunction.invoke(body.arguments)
+
   return {}
 }, {
   body: functionStateServerCallFunctionRequest,
