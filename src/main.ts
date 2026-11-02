@@ -1,11 +1,13 @@
-import { functionStateServerCallFunctionRequest } from '@v3rt3p/types/function-state-server'
-import dotenv from 'dotenv'
-import express from 'express'
+import node from '@elysia/node'
+import openapi from '@elysia/openapi'
+import { functions, functionStateServerCallFunctionRequest, functionStateServerCallFunctionResponse, functionStateServerGetDependantFunctionsRequest, functionStateServerGetDependantStateRequest, functionStateServerStateResponse } from '@v3rt3p/types/function-state-server'
+import Elysia from 'elysia'
 import mqtt, { MqttClient } from 'mqtt'
 import fs from 'node:fs'
 import { parse } from 'yaml'
 import z from 'zod'
 
+import { getEnvironment } from './environment'
 import {
   StatefulMQTTFunctionProvider,
   configValidator as statefulMqttFunctionProviderConfigValidator
@@ -14,7 +16,7 @@ import {
   StatelessMQTTFunctionProvider,
   configValidator as statelessMqttFunctionProviderConfigValidator
 } from './function-provider/stateless-mqtt'
-import { FunctionProvider } from './function-provider/types'
+import { FunctionArgument, FunctionProvider } from './function-provider/types'
 import { getLogger } from './logger'
 import {
   MoonrakerStatusStateProvider,
@@ -29,17 +31,7 @@ import {
 
 const logger = getLogger()
 
-dotenv.config({
-  path: '.env.local'
-})
-dotenv.config()
-
-const PORT = Number.parseInt(process.env.PORT || '8080')
-
-const MQTT_URL = process.env.MQTT_URL ?? 'mqtts://alice:alice@mqtt.svc.bksp.in:8883'
-const MQTT_CA_CERTIFICATE_PATH = process.env.MQTT_CA_CERTIFICATE_PATH ?? 'ca-cert.pem'
-
-const CONFIG_PATH = process.env.CONFIG_PATH ?? 'config.yaml'
+const environment = getEnvironment()
 
 interface AllDependencies {
   mqtt: MqttClient;
@@ -79,10 +71,10 @@ const configType = z.object({
   stateProviders: z.record(z.string(), stateProviderConfigs)
 })
 
-const config = configType.parse(parse(fs.readFileSync(CONFIG_PATH).toString('utf8')))
+const config = configType.parse(parse(fs.readFileSync(environment.CONFIG_PATH).toString('utf8')))
 
-const mqttClient = mqtt.connect(MQTT_URL, {
-  ca: [fs.readFileSync(MQTT_CA_CERTIFICATE_PATH)]
+const mqttClient = mqtt.connect(environment.MQTT_URL, {
+  ca: [fs.readFileSync(environment.MQTT_CA_CERTIFICATE_PATH)]
 })
 mqttClient.on('connect', () => {
   logger.info('Connected to MQTT')
@@ -90,9 +82,6 @@ mqttClient.on('connect', () => {
 mqttClient.on('error', error => {
   logger.error('MQTT error: ', error)
 })
-
-const app = express()
-app.use(express.json())
 
 const dependencies: AllDependencies = {
   mqtt: mqttClient
@@ -120,76 +109,165 @@ for (const [name, providerConfig] of Object.entries(config.functionProviders)) {
   logger.info(`Registered '${name}' function provider`)
 }
 
-app.put('/state', (_, response) => {
-  response.status(200).json({})
+const internalErrorType = z.object({
+  code: z.literal('INTERNAL_SERVER_ERROR'),
+  text: z.string().optional().describe('Optional error text')
 })
 
-app.post('/state', (_, response) => {
-  (async () => {
-    const promises: Promise<[string, {
-      description: string,
-      value: string;
-    }]>[] = []
-    for (const [name, provider] of Object.entries(stateProviders)) {
-      promises.push((async () => {
-        try {
-          const result = await provider.getValue()
-          return [name, {
-            description: provider.getDescription(),
-            value: result
-          }]
-        } catch (error) {
-          logger.warn(`Failed to get '${name}' state: ${error}`)
-          return [name, {
-            description: provider.getDescription(),
-            value: 'not available'
-          }]
-        }
-      })())
+const functionNotFoundErrorType = z.object({
+  code: z.literal('FUNCTION_NOT_FOUND')
+})
+
+const app = new Elysia({
+  adapter: node()
+}).use(openapi({
+  documentation: {
+    info: {
+      title: 'Function-state-server API',
+      version: '1.4.6'
     }
-    response.status(200).json(Object.fromEntries(await Promise.all(promises)))
-  })().catch((error) => {
-    response.status(500).json({
-      error: error.toString()
+  },
+  mapJsonSchema: {
+    zod: z.toJSONSchema
+  }
+}))
+  .guard({
+    response: {
+      500: internalErrorType
+    }
+  })
+  .onError(async ({ error, status }) => {
+    status(500, {
+      code: 'INTERNAL_SERVER_ERROR',
+      text: String(error)
     })
   })
+
+app.get('/state', async () => {
+  return {}
+}, {
+  detail: {
+    summary: 'Get independent state',
+    tags: ['state']
+  },
+  response: {
+    200: functionStateServerStateResponse
+  }
 })
 
-app.get('/functions', (_, response) => {
-  response.status(200).json(Object.fromEntries(Object.entries(functionProviders)
+app.put('/state', async () => {
+  const promises: Promise<[string, {
+    description: string,
+    value: string;
+  }]>[] = []
+  for (const [name, provider] of Object.entries(stateProviders)) {
+    promises.push((async () => {
+      try {
+        const result = await provider.getValue()
+        return [name, {
+          description: provider.getDescription(),
+          value: result
+        }]
+      } catch (error) {
+        logger.warn(`Failed to get '${name}' state: ${error}`)
+        return [name, {
+          description: provider.getDescription(),
+          value: 'not available'
+        }]
+      }
+    })())
+  }
+  return Object.fromEntries(await Promise.all(promises))
+}, {
+  body: functionStateServerGetDependantStateRequest,
+  detail: {
+    summary: 'Get dependent state',
+    tags: ['state']
+  },
+  response: {
+    200: functionStateServerStateResponse
+  }
+})
+
+function convertArgumentsToZodType (argumentsInfo: Record<string, FunctionArgument>): z.ZodType {
+  const types: Record<string, z.ZodSchema> = {}
+  for (const [key, value] of Object.entries(argumentsInfo)) {
+    types[key] = convertArgumentToZodType(value)
+  }
+  return Object.keys(types).length === 0 ? z.object({}) : z.object(types)
+}
+
+function convertArgumentToZodType (type: FunctionArgument): z.ZodType {
+  switch (type.constraints.type) {
+    case 'number-min-max': {
+      return z.number().min(type.constraints.min).max(type.constraints.max).describe(type.description)
+    }
+    case 'number-variants': {
+      return z.union(type.constraints.variants.map(variant =>
+        z.literal(variant.value).describe(variant.description))).describe(type.description)
+    }
+  }
+}
+
+app.get('/functions', async () => {
+  return Object.fromEntries(Object.entries(functionProviders)
     .map(([name, provider]) => {
       return [name, {
-        arguments: provider.getArguments(),
-        description: provider.getDescription()
+        arguments: convertArgumentsToZodType(provider.getArguments()),
+        description: provider.getDescription(),
+        hasResponse: false
       }]
-    })))
+    }))
+}, {
+  detail: {
+    summary: 'Get independent functions',
+    tags: ['functions']
+  },
+  response: {
+    200: functions
+  }
 })
 
-app.patch('/functions', (request, response) => {
-  const body = functionStateServerCallFunctionRequest.parse(request.body)
+app.put('/functions', async () => {
+  return {}
+}, {
+  body: functionStateServerGetDependantFunctionsRequest,
+  detail: {
+    summary: 'Get dependent functions',
+    tags: ['functions']
+  },
+  response: {
+    200: functions
+  }
+})
+
+app.post('/functions', async ({ body, status }) => {
   const calledFunction = functionProviders[body.name]
   logger.info(`Called function '${body.name}' with ${JSON.stringify(body)}`)
+
   if (!calledFunction) {
-    response.status(500).json({
-      error: 'No such function exists'
+    return status(404, {
+      code: 'FUNCTION_NOT_FOUND'
     })
-    return
   }
-  calledFunction.invoke(body.arguments)
-    .then(() => {
-      response.status(200).json({})
-    })
-    .catch(error => {
-      response.status(500).json({
-        error: error.toString()
-      })
-    })
+
+  return {}
+}, {
+  body: functionStateServerCallFunctionRequest,
+  detail: {
+    summary: 'Call function',
+    tags: ['functions']
+  },
+  response: {
+    200: functionStateServerCallFunctionResponse,
+    404: functionNotFoundErrorType
+  }
 })
 
-app.listen(PORT, error => {
-  if (error) {
-    logger.fatal(`Failed to start on :${PORT}: ${error}`)
-    return
-  }
-  logger.info(`Started on :${PORT}`)
-})
+try {
+  app.listen(environment.PORT, () => {
+    logger.info(`Started function-state-server on :${environment.PORT}`)
+  })
+} catch (error) {
+  logger.error(`function-state-server failed to start on :${environment.PORT}: ${error}`)
+}
