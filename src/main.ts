@@ -271,3 +271,13 @@ try {
 } catch (error) {
   logger.error(`function-state-server failed to start on :${environment.PORT}: ${error}`)
 }
+
+process.removeAllListeners('SIGINT')
+
+process.on('SIGINT', () => {
+  logger.info('Stopping...')
+  if (app.server) {
+    app.stop()
+  }
+  logger.info('Stopped')
+})
