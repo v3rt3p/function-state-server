@@ -243,7 +243,10 @@ app.put('/functions', async () => {
 
 app.post('/functions', async ({ body, status }) => {
   const calledFunction = functionProviders[body.name]
-  logger.info(`Called function '${body.name}' with ${JSON.stringify(body)}`)
+  logger.info(`Called function '${body.name}' with ${JSON.stringify({
+    ...body,
+    metadata: '...'
+  })}`)
 
   if (!calledFunction) {
     return status(404, {
